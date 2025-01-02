@@ -1,4 +1,3 @@
-
 ---
 
 - name: Create and configure LXC container with PiVPN
@@ -25,45 +24,49 @@
         template_options: --release bookworm --arch amd64
         state: started
 
-#     - name: Configure static IP for the container
-#       lineinfile:
-#         path: /var/lib/lxc/{{ container_name }}/config
-#         line: "{{ item }}"
-#       with_items:
-#         - "lxc.net.0.type = veth"
-#         - "lxc.net.0.link = lxcbr0"
-#         - "lxc.net.0.flags = up"
-#         - "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx"
-#         - "lxc.net.0.ipv4.address = {{ static_ip }}"
-#         - "lxc.net.0.ipv4.gateway = {{ gateway_ip }}"
+    - name: Configure static IP for the container
+      lineinfile:
+        path: /var/lib/lxc/{{ container_name }}/config
+        line: "{{ item }}"
+      with_items:
+        - "lxc.net.0.type = veth"
+        - "lxc.net.0.link = br0"
+        - "lxc.net.0.flags = up"
+        - "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx"
+        - "lxc.net.0.ipv4.address = {{ static_ip }}"
+        - "lxc.net.0.ipv4.gateway = {{ gateway_ip }}"
 
-#     - name: Install minimal packages and SSH server
-#       ansible.builtin.shell: |
-#         lxc-attach -n {{ container_name }} -- apt update
-#         lxc-attach -n {{ container_name }} -- apt install --no-install-recommends openssh-server sudo wget curl -y
+    - name: Install minimal packages and SSH server
+      ansible.builtin.shell:     |
+        lxc-attach -n {{ container_name }} -- apt update
+        lxc-attach -n {{ container_name }} -- apt install --no-install-recommends openssh-server sudo wget curl vim iputils-ping traceroute -y
 
-#     - name: Enable SSH service
-#       ansible.builtin.shell: |
-#         lxc-attach -n {{ container_name }} -- systemctl enable ssh
-#         lxc-attach -n {{ container_name }} -- systemctl start ssh
+    - name: Enable SSH service
+      ansible.builtin.shell: |
+        lxc-stop -n {{ container_name }}
+        lxc-start -n {{ container_name }} 
 
-#     - name: Set custom hostname
-#       ansible.builtin.shell: |
-#         lxc-attach -n {{ container_name }} -- hostnamectl set-hostname mycontainer
+    - name: Set custom hostname
+      ansible.builtin.shell: |
+        lxc-attach -n {{ container_name }} -- hostnamectl set-hostname mycontainer
+    - name: Restart container
+      ansible.builtin.shell: |
+        lxc-attach -n {{ container_name }} -- systemctl enable ssh
+        lxc-attach -n {{ container_name }} -- systemctl start ssh
 
-#     - name: Create group 'devpl' with GID 300 in the container
-#       ansible.builtin.group:
-#         name: {{ devpl_group}}
-#         gid: {{ devpl_gid}}
-#         state: present
+    - name: Create group 'devpl' with GID 300 in the container
+      ansible.builtin.group:
+        name: "{{ devpl_group }}"
+        gid: "{{ devpl_gid }}"
+        state: present
 
-#     - name: Create user 'carlos' with UID 1015 and GID 300 in the container
-#       ansible.builtin.user:
-#         name: {{ user_username }}
-#         uid: {{ devpl_uid}}
-#         group: {{ devpl_group }}
-#         password: "{{ user_password }}"
-#         state: present
+    - name: Create user 'carlos' with UID 1015 and GID 300 in the container
+      ansible.builtin.user:
+        name: "{{ user_username }}"
+        uid: "{{ devpl_uid}}"
+        group: "{{ devpl_group }}"
+        password: "{{ user_password }}"
+        state: present
 
 #     - name: Copy PiVPN installation script to the container
 #       copy:
