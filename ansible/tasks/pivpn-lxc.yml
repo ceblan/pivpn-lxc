@@ -1,0 +1,78 @@
+---
+- name: Create and configure LXC container with PiVPN
+  hosts: urganda
+  become: yes
+  vars_files:
+    - ./vars/vars.yml
+    - ./vars/secrets.yml
+
+  vars:
+    container_name: pivpn
+    static_ip: "192.168.1.31/24"
+    ceb_password: {{  ceb_password }}
+    gateway_ip: "192.168.1.1"
+    net_interface: "eth0"
+    pivpn_user: carlos
+    pivpn_port: 1194
+    pivpn_key_size: 2048
+    public_dns: "8.8.8.8"
+    ovpn_dns1: "8.8.8.8"
+    ovpn_dns2: "8.8.4.4"
+    server_name: "server"
+    mail_address: "user@example.com"
+
+  tasks:
+    - name: Create group 'devpl' with GID 300 in the container
+      ansible.builtin.group:
+        name: {{ devpl_group }}
+        gid: {{ devpl_gid }}
+        state: present
+
+    - name: Create user 'carlos' with UID 1015 and GID 300 in the container
+      ansible.builtin.user:
+        name: {{ user_username }}
+        uid: {{ user_uid }}
+        group: {{ devpl_group }}
+        password: {{ user_password }}
+        state: present
+
+    - name: Install minimal packages and SSH server
+      ansible.builtin.shell: |
+        lxc-attach -n {{ container_name }} -- apt update
+        lxc-attach -n {{ container_name }} -- apt install --no-install-recommends openssh-server sudo wget curl -y
+
+    - name: Enable SSH service
+      ansible.builtin.shell: |
+        lxc-attach -n {{ container_name }} -- systemctl enable ssh
+        lxc-attach -n {{ container_name }} -- systemctl start ssh
+
+    - name: Set custom hostname
+      ansible.builtin.shell: |
+        lxc-attach -n {{ container_name }} -- hostnamectl set-hostname mycontainer
+
+    - name: Configure static IP address
+      lineinfile:
+        path: /var/lib/lxc/{{ container_name }}/config
+        line: "{{ item }}"
+      with_items:
+        - "lxc.net.0.type = veth"
+        - "lxc.net.0.link = lxcbr0"
+        - "lxc.net.0.flags = up"
+        - "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx"
+        - "lxc.net.0.ipv4.address = {{ static_ip }}"
+        - "lxc.net.0.ipv4.gateway = {{ gateway_ip }}"
+
+    - name: Copy PiVPN installation script to the container
+      copy:
+        src: install_pivpn.sh
+        dest: /root/install_pivpn.sh
+        mode: '0755'
+
+    - name: Execute PiVPN installation script in the container
+      ansible.builtin.shell: |
+        lxc-attach -n {{ container_name }} -- bash /root/install_pivpn.sh
+
+    - name: Clean up installation script in the container
+      file:
+        path: /root/install_pivpn.sh
+        state: absent
