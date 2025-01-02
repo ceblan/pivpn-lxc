@@ -6,35 +6,34 @@
     - ./vars/vars.yml
     - ./vars/secrets.yml
 
-  vars:
-    container_name: pivpn
-    static_ip: "192.168.1.31/24"
-    ceb_password: {{  ceb_password }}
-    gateway_ip: "192.168.1.1"
-    net_interface: "eth0"
-    pivpn_user: carlos
-    pivpn_port: 1194
-    pivpn_key_size: 2048
-    public_dns: "8.8.8.8"
-    ovpn_dns1: "8.8.8.8"
-    ovpn_dns2: "8.8.4.4"
-    server_name: "server"
-    mail_address: "user@example.com"
-
   tasks:
-    - name: Create group 'devpl' with GID 300 in the container
-      ansible.builtin.group:
-        name: {{ devpl_group }}
-        gid: {{ devpl_gid }}
+    - name: Ensure LXC tools are installed
+      apt:
+        name:
+          - lxc
+          - bridge-utils
+          - curl
+          - wget
         state: present
 
-    - name: Create user 'carlos' with UID 1015 and GID 300 in the container
-      ansible.builtin.user:
-        name: {{ user_username }}
-        uid: {{ user_uid }}
-        group: {{ devpl_group }}
-        password: {{ user_password }}
-        state: present
+    - name: Create LXC container
+      community.general.lxc_container:
+        name: "{{ container_name }}"
+        template: debian
+        template_options: --release bookworm --arch amd64
+        state: started
+
+    - name: Configure static IP for the container
+      lineinfile:
+        path: /var/lib/lxc/{{ container_name }}/config
+        line: "{{ item }}"
+      with_items:
+        - "lxc.net.0.type = veth"
+        - "lxc.net.0.link = lxcbr0"
+        - "lxc.net.0.flags = up"
+        - "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx"
+        - "lxc.net.0.ipv4.address = {{ static_ip }}"
+        - "lxc.net.0.ipv4.gateway = {{ gateway_ip }}"
 
     - name: Install minimal packages and SSH server
       ansible.builtin.shell: |
@@ -50,21 +49,69 @@
       ansible.builtin.shell: |
         lxc-attach -n {{ container_name }} -- hostnamectl set-hostname mycontainer
 
-    - name: Configure static IP address
-      lineinfile:
-        path: /var/lib/lxc/{{ container_name }}/config
-        line: "{{ item }}"
-      with_items:
-        - "lxc.net.0.type = veth"
-        - "lxc.net.0.link = lxcbr0"
-        - "lxc.net.0.flags = up"
-        - "lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx"
-        - "lxc.net.0.ipv4.address = {{ static_ip }}"
-        - "lxc.net.0.ipv4.gateway = {{ gateway_ip }}"
+    - name: Create group 'devpl' with GID 300 in the container
+      ansible.builtin.group:
+        name: {{ devpl_group}}
+        gid: {{ devpl_gid}}
+        state: present
+
+    - name: Create user 'carlos' with UID 1015 and GID 300 in the container
+      ansible.builtin.user:
+        name: {{ user_username }}
+        uid: {{ devpl_uid}}
+        group: {{ devpl_group }}
+        password: "{{ user_password }}"
+        state: present
 
     - name: Copy PiVPN installation script to the container
       copy:
-        src: install_pivpn.sh
+        content: |
+          #!/bin/bash
+          do_install_pivpn() {
+              setupVars=/etc/pivpn/setupVars.conf
+              if [ -e "${setupVars}" ]; then
+                  sed -i.update.bak '/pivpnUser/d;/UNATTUPG/d;/pivpnInterface/d;/IPv4dns/d;/IPv4addr/d;/IPv4gw/d;/pivpnProto/d;/PORT/d;/ENCRYPT/d;/DOWNLOAD_DH_PARAM/d;/PUBLICDNS/d;/OVPNDNS1/d;/OVPNDNS2/d;/SERVER_NAME/d;' "${setupVars}"
+              else
+                  mkdir -p /etc/pivpn
+                  touch "${setupVars}"
+              fi
+              {
+                  echo "pivpnUser={{ pivpn_user }}"
+                  echo 'UNATTUPG="unattended-upgrades"'
+                  echo "pivpnInterface={{ net_interface }}"
+                  echo "IPv4dns=127.0.0.1"
+                  echo "IPv4addr={{ internal_ip }}"
+                  echo "IPv4gw={{ gateway_ip }}"
+                  echo "pivpnProto=udp"
+                  echo "PORT={{ pivpn_port }}"
+                  echo "ENCRYPT={{ pivpn_key_size }}"
+                  echo "DOWNLOAD_DH_PARAM=false"
+                  echo "PUBLICDNS={{ external_fqdn }}"
+                  echo "OVPNDNS1={{ ovpn_dns1 }}"
+                  echo "OVPNDNS2={{ ovpn_dns2 }}"
+                  echo "SERVER_NAME=server"
+              } >> "${setupVars}"
+              cd /etc/pivpn
+              wget https://raw.githubusercontent.com/pivpn/pivpn/master/auto_install/install.sh
+              chmod +x install.sh
+              ./install.sh --unattended > $LOG_DIR/pivpn_install.log
+              do_pivpn_add_user
+          }
+
+          do_pivpn_add_user() {
+              PIVPN_CLIENT_NAME=$(hostname)
+              pivpn add -n $PIVPN_CLIENT_NAME -p {{ pivpn_passwd }}
+              if [ -f /etc/pihole/setupVars.conf ]; then
+                  cat > ~/vpnmail.txt <<EOF
+This is your VPN Certificate file. Please import it with your OpenVPN client to connect to $HOSTNAME.
+Have a nice day!
+EOF
+                  mail -s "OpenVPN Configuration" --attach=/home/{{ pivpn_user }}/ovpns/$PIVPN_CLIENT_NAME.ovpn {{ mail_from_address }}@{{ mail_domain }} < ~/vpnmail.txt
+                  rm ~/vpnmail.txt
+              fi
+          }
+
+          do_install_pivpn
         dest: /root/install_pivpn.sh
         mode: '0755'
 
@@ -73,6 +120,6 @@
         lxc-attach -n {{ container_name }} -- bash /root/install_pivpn.sh
 
     - name: Clean up installation script in the container
-      file:
+      ansible.builtin.file:
         path: /root/install_pivpn.sh
         state: absent
