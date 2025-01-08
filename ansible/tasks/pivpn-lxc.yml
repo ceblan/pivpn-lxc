@@ -17,6 +17,97 @@
           - wget
         state: present
 
+    # Desde aquí hasta siguiente aviso es para destrucción/recreación
+    - name: Ensure the directory for SSH keys exists
+      file:
+        path: "{{ playbook_dir }}/files/ssh-keys/{{ container_name }}"
+        state: directory
+
+    - name: Check if keys exist
+      shell: "find {{ playbook_dir }}/files/ssh-keys/{{ container_name }} -name '*key*' | wc -l"
+      register: ssh_keys_exists
+      changed_when: false
+
+    - debug:
+        msg: "Number of keys found: {{ ssh_keys_exists.stdout }}"
+
+    - name: Generate SSH host keys
+      command: ssh-keygen -t {{ item }} -N "" -f {{ playbook_dir }}/files/ssh-keys/{{ container_name }}/ssh_host_{{ item }}_key
+      with_items:
+        - rsa
+        - ecdsa
+        - ed25519
+      when: ssh_keys_exists.stdout | trim | int != 6
+
+    - name: Change {{ playbook_dir }}/files/ssh-keys/{{ container_name }} owner to {{ ansible_env.USER }}
+      shell: "chown {{ ansible_env.USER }}:{{ ansible_env.USER }} {{ playbook_dir }}/files/ssh-keys/{{ container_name }}/*"
+      register: ssh_key_files
+
+
+    - name: Change keys permissions before copy
+      shell: "chmod 644 {{ playbook_dir }}/files/ssh-keys/{{ container_name }}/*"
+      register: ssh_key_files
+
+    - name: Ensure the directory for SSH shared keys exists
+      file:
+        path: "{{ playbook_dir }}/files/ssh-keys/shared"
+        state: directory
+
+    - name: Check if shared keys exist
+      shell: "find {{ playbook_dir }}/files/ssh-keys/shared/ -name 'id_rsa_lxc*' | wc -l"
+      register: ssh_shared_keys_exists
+      changed_when: false
+
+    - debug:
+        msg: "Number of shared keys found: {{ ssh_shared_keys_exists.stdout }}"
+
+    - name: Generate SSH shared keys
+      command: ssh-keygen -t rsa -N "" -f {{ playbook_dir }}/files/ssh-keys/shared/id_rsa_lxc
+      when: ssh_shared_keys_exists.stdout | trim | int != 2
+
+    - name: Change keys permissions before copy
+      shell: "chmod 644 {{ playbook_dir }}/files/ssh-keys/shared/*"
+      register: ssh_key_files
+
+
+    - name: Check if {{ container_name }} container exists
+      command: lxc-ls | grep {{ container_name }}
+      register: tsc_exists
+      ignore_errors: yes
+
+    - name: Check if {{ container_name }} container exists
+      command: lxc-ls --fancy
+      register: lxc_list
+
+    - name: Check if {{ container_name }} container is running
+      command: lxc-ls --running | grep {{ container_name }}
+      register: container_status
+      ignore_errors: yes
+      when: tsc_exists.rc == 0
+
+    - name: Stop {{ container_name }} container if it is running
+      command: lxc-stop -n {{ container_name }}
+      ignore_errors: yes
+      when: container_status.stdout != "" and  container_name in container_status.stdout_lines
+
+    - name: Destroy {{ container_name }} container if it exists
+      command: lxc-destroy -n {{ container_name }}
+      when: container_name in tsc_exists.stdout
+
+    - name: Create directory for {{ container_name }} container
+      file:
+        path: /var/lib/lxc/{{ container_name }}
+        state: directory
+
+    - name: Check if {{ container_name }} container exists
+      command: lxc-ls --fancy
+      register: lxc_list
+
+    - name: Create LXC container {{ container_name }} if it does not exist
+      command: lxc-create --name {{ container_name }} --template download -- --dist debian --release bookworm --arch amd64
+      when: "container_name not in lxc_list.stdout"
+      # Hasta aquí la recreación
+
     - name: Create LXC container
       community.general.lxc_container:
         name: "{{ container_name }}"
@@ -44,11 +135,8 @@
     - name: Enable SSH service
       ansible.builtin.shell: |
         lxc-stop -n {{ container_name }}
-        lxc-start -n {{ container_name }} 
+        lxc-start -n {{ container_name }}
 
-    - name: Set custom hostname
-      ansible.builtin.shell: |
-        lxc-attach -n {{ container_name }} -- hostnamectl set-hostname mycontainer
     - name: Restart container
       ansible.builtin.shell: |
         lxc-attach -n {{ container_name }} -- systemctl enable ssh
